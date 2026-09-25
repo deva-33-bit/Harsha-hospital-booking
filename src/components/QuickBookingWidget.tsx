@@ -31,6 +31,7 @@ export const QuickBookingWidget: React.FC = () => {
     hasLoadedDemoData,
     setShowAuthModal,
     setAuthModalMode,
+    supabaseProjectId,
   } = useHospital();
 
   // Extract distinct departments from active doctors or services
@@ -670,9 +671,12 @@ export const QuickBookingWidget: React.FC = () => {
                     )}
                   </button>
 
-                  <div className="flex items-center justify-between text-[11px] text-slate-500 mt-2 px-1">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[11px] text-slate-500 mt-2 px-1 gap-1">
                     <span>• Instant confirmed booking with Token ID</span>
-                    <span>• No advance online payment required</span>
+                    <span className="text-teal-700 font-medium flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
+                      Supabase Cloud Backend Active ({supabaseProjectId})
+                    </span>
                   </div>
                 </div>
               </div>

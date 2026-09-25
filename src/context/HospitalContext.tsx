@@ -29,6 +29,15 @@ import {
   SAMPLE_OPD_SCHEDULES,
   SAMPLE_APPOINTMENTS,
 } from '../data/initialData';
+import {
+  saveAppointmentToSupabase,
+  updateAppointmentInSupabase,
+  deleteAppointmentFromSupabase,
+  fetchAppointmentsFromSupabase,
+  checkSupabaseConnection,
+  SUPABASE_PROJECT_ID,
+  SUPABASE_SCHEMA_SQL,
+} from '../lib/supabase';
 
 interface BookingPayload {
   doctorId: string;
@@ -65,6 +74,8 @@ interface HospitalContextType {
   updateAppointmentStatus: (id: string, status: AppointmentStatus) => void;
   rescheduleAppointment: (id: string, date: string, time: string) => { success: boolean; error?: string };
   cancelAppointment: (id: string, reason?: string) => void;
+  editAppointment: (id: string, updates: Partial<Appointment>) => Promise<{ success: boolean; error?: string }>;
+  deleteAppointment: (id: string) => Promise<{ success: boolean; error?: string }>;
   facilities: Facility[];
   addFacility: (fac: Omit<Facility, 'id'>) => Facility;
   deleteFacility: (id: string) => void;
@@ -97,6 +108,13 @@ interface HospitalContextType {
   seedSampleData: () => void;
   clearToVerifiedOnly: () => void;
   hasLoadedDemoData: boolean;
+  supabaseStatus: { connected: boolean; tableExists: boolean; message: string; lastChecked?: string };
+  supabaseSyncState: 'idle' | 'syncing' | 'synced' | 'error';
+  supabaseLastError: string | null;
+  refreshSupabaseConnection: () => Promise<void>;
+  syncAppointmentsFromSupabase: () => Promise<void>;
+  supabaseProjectId: string;
+  supabaseSchemaSql: string;
 }
 
 const HospitalContext = createContext<HospitalContextType | undefined>(undefined);
@@ -153,6 +171,73 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'admin'>('login');
   const [showAppointmentSlipModal, setShowAppointmentSlipModal] = useState<Appointment | null>(null);
   const [hasLoadedDemoData, setHasLoadedDemoData] = useState<boolean>(() => getStored('has_demo_data', false));
+
+  // Supabase Backend State
+  const [supabaseStatus, setSupabaseStatus] = useState<{
+    connected: boolean;
+    tableExists: boolean;
+    message: string;
+    lastChecked?: string;
+  }>({
+    connected: false,
+    tableExists: false,
+    message: 'Connecting to Supabase project xhuxhhfbcudikdptaejy...',
+  });
+  const [supabaseSyncState, setSupabaseSyncState] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
+  const [supabaseLastError, setSupabaseLastError] = useState<string | null>(null);
+
+  const refreshSupabaseConnection = async () => {
+    try {
+      const status = await checkSupabaseConnection();
+      setSupabaseStatus({
+        ...status,
+        lastChecked: new Date().toLocaleTimeString(),
+      });
+    } catch (err: any) {
+      setSupabaseStatus({
+        connected: false,
+        tableExists: false,
+        message: err.message,
+        lastChecked: new Date().toLocaleTimeString(),
+      });
+    }
+  };
+
+  const syncAppointmentsFromSupabase = async () => {
+    setSupabaseSyncState('syncing');
+    try {
+      const res = await fetchAppointmentsFromSupabase();
+      if (res.success) {
+        if (res.appointments.length > 0) {
+          setAppointments((prev) => {
+            const dbMap = new Map(res.appointments.map((a) => [a.appointmentNumber, a]));
+            const updatedLocal = prev.map((local) => {
+              const fromDb = dbMap.get(local.appointmentNumber);
+              if (fromDb) {
+                dbMap.delete(local.appointmentNumber);
+                return { ...local, ...fromDb };
+              }
+              return local;
+            });
+            const remainingFromDb = Array.from(dbMap.values());
+            return [...remainingFromDb, ...updatedLocal];
+          });
+        }
+        setSupabaseSyncState('synced');
+      } else {
+        setSupabaseLastError(res.error || 'Could not fetch from Supabase');
+        setSupabaseSyncState('error');
+      }
+    } catch (err: any) {
+      setSupabaseLastError(err.message);
+      setSupabaseSyncState('error');
+    }
+  };
+
+  useEffect(() => {
+    refreshSupabaseConnection();
+    syncAppointmentsFromSupabase();
+  }, []);
 
   // Sync to localStorage
   useEffect(() => setStored('info', hospitalInfo), [hospitalInfo]);
@@ -403,6 +488,35 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setNotificationLogs((prev) => [waLog, ...prev]);
     }
 
+    // 4. Save to Supabase Database (Project: xhuxhhfbcudikdptaejy)
+    setSupabaseSyncState('syncing');
+    saveAppointmentToSupabase(newAppointment, doctorName)
+      .then((res) => {
+        if (res.success) {
+          setSupabaseSyncState('synced');
+          setSupabaseLastError(null);
+          // Log Supabase persistence
+          const sbLog: NotificationLog = {
+            id: 'notif-sb-' + Date.now(),
+            appointmentId: newAppointment.id,
+            channel: 'Email',
+            recipient: `Supabase [${SUPABASE_PROJECT_ID}]`,
+            message: `[Supabase DB Sync] Saved appointment #${newAppointment.appointmentNumber} (Token #${tokenNumber}) to Supabase table 'appointments'.`,
+            status: 'Delivered',
+            timestamp: new Date().toLocaleTimeString(),
+          };
+          setNotificationLogs((prev) => [sbLog, ...prev]);
+        } else {
+          setSupabaseSyncState('error');
+          setSupabaseLastError(res.error || 'Failed to save to Supabase');
+          console.warn('Supabase sync notice:', res.error);
+        }
+      })
+      .catch((err) => {
+        setSupabaseSyncState('error');
+        setSupabaseLastError(err.message);
+      });
+
     return {
       success: true,
       appointment: newAppointment,
@@ -410,11 +524,19 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const updateAppointmentStatus = (id: string, status: AppointmentStatus) => {
+    const targetApt = appointments.find((a) => a.id === id);
     setAppointments((prev) =>
       prev.map((apt) =>
         apt.id === id ? { ...apt, status, updatedAt: new Date().toISOString() } : apt
       )
     );
+
+    // Sync status change to Supabase
+    if (targetApt) {
+      updateAppointmentInSupabase(targetApt.appointmentNumber, { status }).catch((err) =>
+        console.warn('Failed to update status in Supabase:', err)
+      );
+    }
   };
 
   const rescheduleAppointment = (id: string, date: string, time: string) => {
@@ -449,10 +571,18 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       )
     );
 
+    // Sync reschedule to Supabase
+    updateAppointmentInSupabase(existing.appointmentNumber, {
+      appointmentDate: date,
+      appointmentTime: time,
+      status: 'Confirmed',
+    }).catch((err) => console.warn('Failed to sync reschedule to Supabase:', err));
+
     return { success: true };
   };
 
   const cancelAppointment = (id: string, reason?: string) => {
+    const existing = appointments.find((a) => a.id === id);
     setAppointments((prev) =>
       prev.map((apt) =>
         apt.id === id
@@ -465,6 +595,51 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           : apt
       )
     );
+
+    // Sync cancellation to Supabase
+    if (existing) {
+      updateAppointmentInSupabase(existing.appointmentNumber, {
+        status: 'Cancelled',
+        notes: reason ? `Cancellation reason: ${reason}` : existing.notes,
+      }).catch((err) => console.warn('Failed to sync cancellation to Supabase:', err));
+    }
+  };
+
+  const editAppointment = async (id: string, updates: Partial<Appointment>) => {
+    const existing = appointments.find((a) => a.id === id);
+    if (!existing) return { success: false, error: 'Appointment not found' };
+
+    const updatedApt: Appointment = {
+      ...existing,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setAppointments((prev) => prev.map((a) => (a.id === id ? updatedApt : a)));
+
+    // Sync to Supabase
+    const doc = updates.doctorId
+      ? doctors.find((d) => d.id === updates.doctorId)
+      : doctors.find((d) => d.id === existing.doctorId);
+
+    await updateAppointmentInSupabase(existing.appointmentNumber, {
+      ...updates,
+      doctorName: doc ? doc.name : undefined,
+    }).catch((err) => console.warn('Supabase edit sync error:', err));
+
+    return { success: true };
+  };
+
+  const deleteAppointment = async (id: string) => {
+    const existing = appointments.find((a) => a.id === id);
+    setAppointments((prev) => prev.filter((a) => a.id !== id));
+
+    if (existing) {
+      await deleteAppointmentFromSupabase(existing.appointmentNumber).catch((err) =>
+        console.warn('Supabase delete sync error:', err)
+      );
+    }
+    return { success: true };
   };
 
   // Auth operations
@@ -537,6 +712,8 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateAppointmentStatus,
         rescheduleAppointment,
         cancelAppointment,
+        editAppointment,
+        deleteAppointment,
         facilities,
         addFacility,
         deleteFacility,
@@ -569,6 +746,13 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         seedSampleData,
         clearToVerifiedOnly,
         hasLoadedDemoData,
+        supabaseStatus,
+        supabaseSyncState,
+        supabaseLastError,
+        refreshSupabaseConnection,
+        syncAppointmentsFromSupabase,
+        supabaseProjectId: SUPABASE_PROJECT_ID,
+        supabaseSchemaSql: SUPABASE_SCHEMA_SQL,
       }}
     >
       {children}

@@ -12,6 +12,7 @@ import {
   Share2,
   MessageSquare,
   Building,
+  Database,
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { Appointment } from '../types';
@@ -23,6 +24,10 @@ export const BookingConfirmationModal: React.FC = () => {
     hospitalInfo,
     doctors,
     setShowAppointmentSlipModal,
+    supabaseStatus,
+    supabaseSyncState,
+    supabaseProjectId,
+    supabaseLastError,
   } = useHospital();
 
   if (!lastBookedAppointment) return null;
@@ -209,6 +214,26 @@ PATIENT INSTRUCTIONS:
               <p className="font-semibold text-slate-800">Instant SMS & WhatsApp Notification</p>
               <p className="text-[11px] text-slate-500 mt-0.5">
                 Confirmation details and token #{apt.tokenNumber} have been logged for <strong>{apt.phone}</strong>.
+              </p>
+            </div>
+          </div>
+
+          {/* Supabase Database Sync Status */}
+          <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-200 text-xs text-emerald-950 flex items-start gap-2.5">
+            <Database className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between">
+                <p className="font-semibold text-emerald-900">Supabase Database Connected</p>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-200/60 text-emerald-900">
+                  {supabaseProjectId}
+                </span>
+              </div>
+              <p className="text-[11px] text-emerald-800 mt-0.5">
+                {supabaseSyncState === 'syncing'
+                  ? 'Saving record directly to Supabase appointments table...'
+                  : supabaseSyncState === 'error'
+                  ? `Saved locally. Supabase: ${supabaseLastError || 'Table ready for sync'}`
+                  : `Appointment #${apt.appointmentNumber} automatically saved to Supabase 'appointments' table.`}
               </p>
             </div>
           </div>

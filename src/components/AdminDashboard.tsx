@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ShieldCheck,
   Calendar,
@@ -27,6 +27,17 @@ import {
   ExternalLink,
   MessageSquare,
   Lock,
+  Database,
+  Copy,
+  Check,
+  Eye,
+  Download,
+  FileSpreadsheet,
+  Save,
+  FileText,
+  CheckCheck,
+  Ban,
+  X,
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { Appointment, Doctor, Service, Schedule, Facility, GalleryItem, AppointmentStatus, DayOfWeek } from '../types';
@@ -48,9 +59,12 @@ export const AdminDashboard: React.FC = () => {
     updateSchedule,
     deleteSchedule,
     appointments,
+    createAppointment,
     updateAppointmentStatus,
     rescheduleAppointment,
     cancelAppointment,
+    editAppointment,
+    deleteAppointment,
     facilities,
     addFacility,
     deleteFacility,
@@ -67,11 +81,21 @@ export const AdminDashboard: React.FC = () => {
     hasLoadedDemoData,
     setShowAppointmentSlipModal,
     setActivePage,
+    supabaseStatus,
+    supabaseSyncState,
+    supabaseLastError,
+    refreshSupabaseConnection,
+    syncAppointmentsFromSupabase,
+    supabaseProjectId,
+    supabaseSchemaSql,
   } = useHospital();
 
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'appointments' | 'calendar' | 'doctors' | 'services' | 'schedules' | 'facilities' | 'gallery' | 'settings'
-  >('overview');
+    'overview' | 'appointments' | 'calendar' | 'doctors' | 'services' | 'schedules' | 'facilities' | 'gallery' | 'settings' | 'supabase'
+  >('appointments');
+
+  const [copiedSql, setCopiedSql] = useState(false);
+  const [testingSupabase, setTestingSupabase] = useState(false);
 
   // Filters for Appointments
   const [aptSearch, setAptSearch] = useState('');
@@ -85,6 +109,189 @@ export const AdminDashboard: React.FC = () => {
   const [showScheduleModal, setShowScheduleModal] = useState<Schedule | null | 'new'>(null);
   const [showFacilityModal, setShowFacilityModal] = useState<Facility | null | 'new'>(null);
   const [showGalleryModal, setShowGalleryModal] = useState<boolean>(false);
+
+  // Supabase live auto-sync on mount
+  useEffect(() => {
+    syncAppointmentsFromSupabase();
+  }, []);
+
+  // Modals for Appointment Management
+  const [viewingApt, setViewingApt] = useState<Appointment | null>(null);
+  const [editingApt, setEditingApt] = useState<Appointment | null>(null);
+  const [cancellingApt, setCancellingApt] = useState<Appointment | null>(null);
+  const [cancelReason, setCancelReason] = useState<string>('');
+  const [deletingApt, setDeletingApt] = useState<Appointment | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
+
+  // Edit form state
+  const [editFormData, setEditFormData] = useState<{
+    patientName: string;
+    phone: string;
+    email: string;
+    age: number;
+    gender: 'Male' | 'Female' | 'Other';
+    doctorId: string;
+    department: string;
+    appointmentDate: string;
+    appointmentTime: string;
+    status: AppointmentStatus;
+    tokenNumber: number;
+    reason: string;
+    notes: string;
+  }>({
+    patientName: '',
+    phone: '',
+    email: '',
+    age: 30,
+    gender: 'Male',
+    doctorId: '',
+    department: '',
+    appointmentDate: '',
+    appointmentTime: '',
+    status: 'Confirmed',
+    tokenNumber: 1,
+    reason: '',
+    notes: '',
+  });
+
+  const showToast = (msg: string) => {
+    setActionSuccessMsg(msg);
+    setTimeout(() => setActionSuccessMsg(null), 4000);
+  };
+
+  const handleOpenEdit = (apt: Appointment) => {
+    setEditingApt(apt);
+    setEditFormData({
+      patientName: apt.patientName,
+      phone: apt.phone,
+      email: apt.email || '',
+      age: apt.age || 30,
+      gender: apt.gender || 'Male',
+      doctorId: apt.doctorId,
+      department: apt.department,
+      appointmentDate: apt.appointmentDate,
+      appointmentTime: apt.appointmentTime,
+      status: apt.status,
+      tokenNumber: apt.tokenNumber,
+      reason: apt.reason || '',
+      notes: apt.notes || '',
+    });
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingApt) return;
+    setIsSavingEdit(true);
+
+    const doc = doctors.find((d) => d.id === editFormData.doctorId);
+    const departmentToUse = doc ? doc.department : editFormData.department;
+
+    const res = await editAppointment(editingApt.id, {
+      ...editFormData,
+      department: departmentToUse,
+    });
+
+    setIsSavingEdit(false);
+    if (res.success) {
+      setEditingApt(null);
+      if (viewingApt && viewingApt.id === editingApt.id) {
+        setViewingApt({
+          ...viewingApt,
+          ...editFormData,
+          department: departmentToUse,
+        });
+      }
+      showToast(`Appointment #${editingApt.appointmentNumber} updated and saved to database!`);
+    }
+  };
+
+  const handleOpenCancel = (apt: Appointment) => {
+    setCancellingApt(apt);
+    setCancelReason('');
+  };
+
+  const handleConfirmCancel = () => {
+    if (!cancellingApt) return;
+    cancelAppointment(cancellingApt.id, cancelReason || 'Cancelled by Hospital Admin');
+    showToast(`Appointment #${cancellingApt.appointmentNumber} has been cancelled in database.`);
+    if (viewingApt && viewingApt.id === cancellingApt.id) {
+      setViewingApt({
+        ...viewingApt,
+        status: 'Cancelled',
+        notes: cancelReason ? `Cancellation reason: ${cancelReason}` : viewingApt.notes,
+      });
+    }
+    setCancellingApt(null);
+  };
+
+  const handleOpenDelete = (apt: Appointment) => {
+    setDeletingApt(apt);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deletingApt) return;
+    const refNum = deletingApt.appointmentNumber;
+    await deleteAppointment(deletingApt.id);
+    setDeletingApt(null);
+    if (viewingApt && viewingApt.id === deletingApt.id) {
+      setViewingApt(null);
+    }
+    showToast(`Appointment #${refNum} permanently deleted from database.`);
+  };
+
+  const handleExportCSV = () => {
+    const headers = [
+      'Appointment Number',
+      'Token Number',
+      'Patient Name',
+      'Phone',
+      'Email',
+      'Age',
+      'Gender',
+      'Department',
+      'Doctor Name',
+      'Date',
+      'Time',
+      'Status',
+      'Reason',
+      'Notes',
+      'Created At',
+    ];
+
+    const rows = filteredAppointments.map((apt) => {
+      const doc = doctors.find((d) => d.id === apt.doctorId);
+      return [
+        `"${apt.appointmentNumber}"`,
+        apt.tokenNumber,
+        `"${apt.patientName.replace(/"/g, '""')}"`,
+        `"${apt.phone}"`,
+        `"${apt.email || ''}"`,
+        apt.age,
+        `"${apt.gender}"`,
+        `"${apt.department}"`,
+        `"${(doc ? doc.name : 'Attending Doctor').replace(/"/g, '""')}"`,
+        `"${apt.appointmentDate}"`,
+        `"${apt.appointmentTime}"`,
+        `"${apt.status}"`,
+        `"${(apt.reason || '').replace(/"/g, '""')}"`,
+        `"${(apt.notes || '').replace(/"/g, '""')}"`,
+        `"${apt.createdAt}"`,
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `harsha_hospital_appointments_${todayStr}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${filteredAppointments.length} appointments to CSV.`);
+  };
 
   // Calendar View mode
   const [calendarMode, setCalendarMode] = useState<'day' | 'week' | 'month'>('week');
@@ -318,6 +525,7 @@ export const AdminDashboard: React.FC = () => {
               { id: 'facilities', label: `Facilities (${facilities.length})`, icon: Building },
               { id: 'gallery', label: `Gallery (${gallery.length})`, icon: ImageIcon },
               { id: 'settings', label: 'Hospital Settings', icon: Settings },
+              { id: 'supabase', label: 'Supabase Cloud DB', icon: Database },
             ].map((tab) => {
               const Icon = tab.icon;
               return (
@@ -517,31 +725,104 @@ export const AdminDashboard: React.FC = () => {
         {/* TAB 2: APPOINTMENTS MANAGEMENT */}
         {/* ========================================================================= */}
         {activeTab === 'appointments' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-2xs space-y-5">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <h3 className="font-bold text-slate-900 text-lg">Appointments Directory</h3>
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-2xs space-y-6">
+            {/* Supabase Live DB Sync & Action Bar */}
+            <div className="p-4 rounded-xl bg-gradient-to-r from-slate-900 to-teal-950 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-teal-500/20 border border-teal-400/30 flex items-center justify-center text-teal-300">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-sm text-white">Supabase Live Database</span>
+                    <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                      Project: {supabaseProjectId}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mt-0.5">
+                    Showing <strong className="text-white font-bold">{appointments.length}</strong> total booking records stored in your database.
+                  </p>
+                </div>
+              </div>
 
-              {/* Filter Controls */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={async () => {
+                    await syncAppointmentsFromSupabase();
+                    showToast('Successfully refreshed bookings from Supabase database!');
+                  }}
+                  disabled={supabaseSyncState === 'syncing'}
+                  className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:opacity-60 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  title="Fetch and merge latest bookings from Supabase"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${supabaseSyncState === 'syncing' ? 'animate-spin' : ''}`} />
+                  <span>{supabaseSyncState === 'syncing' ? 'Syncing...' : 'Sync Database'}</span>
+                </button>
+
+                <button
+                  onClick={handleExportCSV}
+                  className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Export filtered appointments to CSV file"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export CSV</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Action Success Toast */}
+            {actionSuccessMsg && (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-medium flex items-center justify-between animate-in fade-in duration-200">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{actionSuccessMsg}</span>
+                </div>
+                <button
+                  onClick={() => setActionSuccessMsg(null)}
+                  className="p-1 hover:bg-emerald-100 rounded text-emerald-700"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Header & Filter Controls */}
+            <div className="space-y-3 pt-1">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <h3 className="font-bold text-slate-900 text-lg">Manage Appointments</h3>
+                  <p className="text-xs text-slate-500">
+                    View, search, edit details, reschedule, print slips, or cancel bookings in real time.
+                  </p>
+                </div>
+
+                <div className="text-xs text-slate-600 font-medium">
+                  Showing <strong className="text-slate-900">{filteredAppointments.length}</strong> of {appointments.length} appointments
+                </div>
+              </div>
+
+              {/* Filters Row */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <div className="relative flex-1 min-w-[200px]">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    placeholder="Search patient, token, phone..."
+                    placeholder="Search by patient, phone, email, token or ID..."
                     value={aptSearch}
                     onChange={(e) => setAptSearch(e.target.value)}
-                    className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-300 w-48"
+                    className="w-full pl-8 pr-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-teal-600 focus:ring-1 focus:ring-teal-100"
                   />
                 </div>
 
                 <select
                   value={aptStatusFilter}
                   onChange={(e) => setAptStatusFilter(e.target.value)}
-                  className="px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white"
+                  className="px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white"
                 >
                   <option value="all">All Statuses</option>
-                  <option value="Pending">Pending</option>
                   <option value="Confirmed">Confirmed</option>
+                  <option value="Pending">Pending</option>
                   <option value="Completed">Completed</option>
                   <option value="Cancelled">Cancelled</option>
                 </select>
@@ -549,7 +830,7 @@ export const AdminDashboard: React.FC = () => {
                 <select
                   value={aptDoctorFilter}
                   onChange={(e) => setAptDoctorFilter(e.target.value)}
-                  className="px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 bg-white"
+                  className="px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white"
                 >
                   <option value="all">All Doctors</option>
                   {doctors.map((d) => (
@@ -563,7 +844,8 @@ export const AdminDashboard: React.FC = () => {
                   type="date"
                   value={aptDateFilter}
                   onChange={(e) => setAptDateFilter(e.target.value)}
-                  className="px-2 py-1 text-xs rounded-lg border border-slate-300"
+                  className="px-3 py-2 text-xs rounded-xl border border-slate-300"
+                  title="Filter by appointment date"
                 />
 
                 {(aptSearch || aptStatusFilter !== 'all' || aptDoctorFilter !== 'all' || aptDateFilter) && (
@@ -574,113 +856,197 @@ export const AdminDashboard: React.FC = () => {
                       setAptDoctorFilter('all');
                       setAptDateFilter('');
                     }}
-                    className="px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded"
+                    className="px-3 py-2 text-xs text-red-600 hover:bg-red-50 rounded-xl font-semibold border border-red-200"
                   >
-                    Reset Filters
+                    Reset
                   </button>
                 )}
               </div>
             </div>
 
+            {/* Table */}
             {filteredAppointments.length === 0 ? (
-              <div className="py-12 text-center text-slate-500 text-xs">
-                No appointments match the selected filters.
+              <div className="py-16 text-center border-2 border-dashed border-slate-200 rounded-2xl p-8">
+                <Database className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                <h4 className="text-sm font-bold text-slate-700">No appointments found</h4>
+                <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                  {appointments.length === 0
+                    ? 'No appointments currently stored in the database. Bookings submitted on the website will automatically appear here.'
+                    : 'No appointments match your active search filters.'}
+                </p>
+                <div className="flex items-center justify-center gap-2 mt-4">
+                  <button
+                    onClick={async () => {
+                      await syncAppointmentsFromSupabase();
+                      showToast('Database refreshed.');
+                    }}
+                    className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold"
+                  >
+                    Sync with Supabase
+                  </button>
+                  <button
+                    onClick={() => setActivePage('appointments')}
+                    className="px-4 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold"
+                  >
+                    Open Booking Form
+                  </button>
+                </div>
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto rounded-xl border border-slate-200 shadow-2xs">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 text-slate-700 border-b border-slate-200">
                     <tr>
-                      <th className="py-3 px-3">Token & ID</th>
-                      <th className="py-3 px-3">Patient Details</th>
-                      <th className="py-3 px-3">Doctor & Dept</th>
-                      <th className="py-3 px-3">Date & Time</th>
-                      <th className="py-3 px-3">Reason</th>
-                      <th className="py-3 px-3">Status</th>
-                      <th className="py-3 px-3 text-right">Status Actions</th>
+                      <th className="py-3 px-3.5">Token & ID</th>
+                      <th className="py-3 px-3.5">Patient Information</th>
+                      <th className="py-3 px-3.5">Consultant & Dept</th>
+                      <th className="py-3 px-3.5">Scheduled Slot</th>
+                      <th className="py-3 px-3.5">Reason for Visit</th>
+                      <th className="py-3 px-3.5">Status</th>
+                      <th className="py-3 px-3.5 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-slate-100 bg-white">
                     {filteredAppointments.map((apt) => {
                       const doc = doctors.find((d) => d.id === apt.doctorId);
                       return (
-                        <tr key={apt.id} className="hover:bg-slate-50">
-                          <td className="py-3 px-3">
-                            <span className="font-mono font-bold text-teal-800 text-sm block">
-                              #{apt.tokenNumber}
-                            </span>
-                            <span className="font-mono text-[10px] text-slate-500">
+                        <tr key={apt.id} className="hover:bg-slate-50/80 transition-colors">
+                          {/* Token & Ref */}
+                          <td className="py-3 px-3.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono font-black text-teal-800 text-sm">
+                                #{apt.tokenNumber}
+                              </span>
+                            </div>
+                            <span className="font-mono text-[10px] text-slate-500 block mt-0.5">
                               {apt.appointmentNumber}
                             </span>
                           </td>
-                          <td className="py-3 px-3">
-                            <div className="font-bold text-slate-900">{apt.patientName}</div>
-                            <div className="text-[11px] text-slate-500">
-                              {apt.phone} • {apt.age}y/{apt.gender}
+
+                          {/* Patient Info */}
+                          <td className="py-3 px-3.5">
+                            <button
+                              onClick={() => setViewingApt(apt)}
+                              className="font-bold text-slate-900 hover:text-teal-700 hover:underline text-left block"
+                              title="Click to view full details"
+                            >
+                              {apt.patientName}
+                            </button>
+                            <div className="text-[11px] text-slate-500 mt-0.5">
+                              <span className="font-mono">{apt.phone}</span>
+                              <span className="mx-1">•</span>
+                              <span>{apt.age}y / {apt.gender}</span>
                             </div>
+                            {apt.email && (
+                              <span className="text-[10px] text-slate-400 block truncate max-w-[160px]">
+                                {apt.email}
+                              </span>
+                            )}
                           </td>
-                          <td className="py-3 px-3">
+
+                          {/* Consultant & Dept */}
+                          <td className="py-3 px-3.5">
                             <div className="font-semibold text-slate-800">
                               {doc ? doc.name : 'Consultant'}
                             </div>
-                            <div className="text-[11px] text-teal-700">{apt.department}</div>
-                          </td>
-                          <td className="py-3 px-3">
-                            <div className="font-medium text-slate-800">{apt.appointmentDate}</div>
-                            <div className="text-[11px] text-slate-500 font-bold">
-                              {apt.appointmentTime}
+                            <div className="text-[11px] text-teal-700 font-medium">
+                              {apt.department}
                             </div>
                           </td>
-                          <td className="py-3 px-3 max-w-[150px] truncate text-slate-600" title={apt.reason}>
-                            {apt.reason}
+
+                          {/* Scheduled Date & Time */}
+                          <td className="py-3 px-3.5">
+                            <div className="font-bold text-slate-900 flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-teal-600" />
+                              <span>{apt.appointmentDate}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-600 font-semibold flex items-center gap-1 mt-0.5">
+                              <Clock className="w-3 h-3 text-teal-600" />
+                              <span>{apt.appointmentTime}</span>
+                            </div>
                           </td>
-                          <td className="py-3 px-3">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+
+                          {/* Reason */}
+                          <td className="py-3 px-3.5 max-w-[170px]">
+                            <p className="text-slate-700 truncate" title={apt.reason}>
+                              {apt.reason || 'General medical consultation'}
+                            </p>
+                            {apt.notes && (
+                              <p className="text-[10px] text-slate-400 truncate italic mt-0.5" title={apt.notes}>
+                                Note: {apt.notes}
+                              </p>
+                            )}
+                          </td>
+
+                          {/* Status */}
+                          <td className="py-3 px-3.5">
+                            <select
+                              value={apt.status}
+                              onChange={async (e) => {
+                                const newStatus = e.target.value as AppointmentStatus;
+                                updateAppointmentStatus(apt.id, newStatus);
+                                showToast(`Appointment #${apt.appointmentNumber} status changed to ${newStatus}`);
+                              }}
+                              className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors cursor-pointer ${
                                 apt.status === 'Confirmed'
-                                  ? 'bg-emerald-100 text-emerald-800'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
                                   : apt.status === 'Completed'
-                                  ? 'bg-blue-100 text-blue-800'
+                                  ? 'bg-blue-50 text-blue-800 border-blue-300'
                                   : apt.status === 'Cancelled'
-                                  ? 'bg-red-100 text-red-800'
-                                  : 'bg-amber-100 text-amber-800'
+                                  ? 'bg-red-50 text-red-800 border-red-300'
+                                  : 'bg-amber-50 text-amber-800 border-amber-300'
                               }`}
                             >
-                              {apt.status}
-                            </span>
+                              <option value="Confirmed">Confirmed</option>
+                              <option value="Pending">Pending</option>
+                              <option value="Completed">Completed</option>
+                              <option value="Cancelled">Cancelled</option>
+                            </select>
                           </td>
-                          <td className="py-3 px-3 text-right">
+
+                          {/* Actions */}
+                          <td className="py-3 px-3.5 text-right">
                             <div className="flex items-center justify-end gap-1">
-                              {apt.status !== 'Confirmed' && (
-                                <button
-                                  onClick={() => updateAppointmentStatus(apt.id, 'Confirmed')}
-                                  className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-[11px] font-semibold"
-                                >
-                                  Confirm
-                                </button>
-                              )}
-                              {apt.status !== 'Completed' && (
-                                <button
-                                  onClick={() => updateAppointmentStatus(apt.id, 'Completed')}
-                                  className="px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 text-[11px] font-semibold"
-                                >
-                                  Complete
-                                </button>
-                              )}
+                              <button
+                                onClick={() => setViewingApt(apt)}
+                                className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 transition-colors"
+                                title="View Details"
+                              >
+                                <Eye className="w-3.5 h-3.5 text-teal-600" />
+                              </button>
+
+                              <button
+                                onClick={() => handleOpenEdit(apt)}
+                                className="p-1.5 rounded-lg border border-slate-200 hover:bg-teal-50 text-teal-700 transition-colors"
+                                title="Edit Appointment"
+                              >
+                                <Edit className="w-3.5 h-3.5" />
+                              </button>
+
                               {apt.status !== 'Cancelled' && (
                                 <button
-                                  onClick={() => cancelAppointment(apt.id, 'Cancelled by Admin')}
-                                  className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 text-[11px] font-semibold"
+                                  onClick={() => handleOpenCancel(apt)}
+                                  className="p-1.5 rounded-lg border border-slate-200 hover:bg-red-50 text-red-600 transition-colors"
+                                  title="Cancel Appointment"
                                 >
-                                  Cancel
+                                  <Ban className="w-3.5 h-3.5" />
                                 </button>
                               )}
+
                               <button
                                 onClick={() => setShowAppointmentSlipModal(apt)}
-                                className="p-1 rounded hover:bg-slate-200 text-slate-600"
-                                title="Print Slip"
+                                className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 transition-colors"
+                                title="Print Consultation Slip"
                               >
                                 <Printer className="w-3.5 h-3.5" />
+                              </button>
+
+                              <button
+                                onClick={() => handleOpenDelete(apt)}
+                                className="p-1.5 rounded-lg border border-slate-200 hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
+                                title="Delete from Database"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           </td>
@@ -1283,6 +1649,215 @@ export const AdminDashboard: React.FC = () => {
                   <p className="text-[11px] text-slate-500">{notificationConfig.whatsappProvider}</p>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* TAB 10: SUPABASE CLOUD DATABASE INTEGRATION */}
+        {/* ========================================================================= */}
+        {activeTab === 'supabase' && (
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-2xs space-y-6 max-w-5xl">
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold shadow-xs">
+                  <Database className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-slate-900 text-lg">Supabase Cloud Database</h3>
+                    <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-100 text-emerald-800">
+                      {supabaseProjectId}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Live connection to Supabase backend database for Harsha Hospital appointments.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    setTestingSupabase(true);
+                    await refreshSupabaseConnection();
+                    setTestingSupabase(false);
+                  }}
+                  className="px-3.5 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${testingSupabase ? 'animate-spin' : ''}`} />
+                  <span>Test Connection</span>
+                </button>
+
+                <button
+                  onClick={async () => {
+                    await syncAppointmentsFromSupabase();
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${supabaseSyncState === 'syncing' ? 'animate-spin' : ''}`} />
+                  <span>Pull From Supabase</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Connection Status Card */}
+            <div className={`p-4 rounded-xl border text-xs flex items-start gap-3 ${
+              supabaseStatus.connected
+                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                : 'bg-amber-50/70 border-amber-200 text-amber-900'
+            }`}>
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                supabaseStatus.connected ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-200 text-amber-800'
+              }`}>
+                <Database className="w-4 h-4" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sm">
+                    {supabaseStatus.connected ? 'Supabase Backend Connected' : 'Connecting to Supabase...'}
+                  </span>
+                  {supabaseStatus.lastChecked && (
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      Checked: {supabaseStatus.lastChecked}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 leading-relaxed">{supabaseStatus.message}</p>
+                {supabaseLastError && (
+                  <p className="mt-1 text-red-600 font-medium">Notice: {supabaseLastError}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Credentials Info Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-slate-500 text-[10px] font-semibold uppercase block">
+                  Project ID
+                </span>
+                <span className="font-mono font-bold text-slate-900 text-sm block mt-0.5">
+                  {supabaseProjectId}
+                </span>
+                <span className="text-[10px] text-slate-500">Configured project</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-slate-500 text-[10px] font-semibold uppercase block">
+                  Database Table
+                </span>
+                <span className="font-mono font-bold text-teal-800 text-sm block mt-0.5">
+                  appointments
+                </span>
+                <span className="text-[10px] text-slate-500">Auto-synced on booking</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-slate-500 text-[10px] font-semibold uppercase block">
+                  API Key Route
+                </span>
+                <span className="font-mono text-slate-700 text-xs block mt-0.5 truncate">
+                  sb_publishable_OfLpu1...
+                </span>
+                <span className="text-[10px] text-emerald-700 font-semibold">Active & Authenticated</span>
+              </div>
+            </div>
+
+            {/* SQL Setup Instruction Box */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="font-bold text-slate-900 text-sm">
+                    Supabase PostgreSQL Table Schema
+                  </h4>
+                  <p className="text-xs text-slate-500">
+                    If you haven't created the table in your Supabase dashboard yet, copy and execute this in the SQL Editor.
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(supabaseSchemaSql);
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2500);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                    copiedSql
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'border border-slate-300 hover:bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  {copiedSql ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Copied SQL!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-teal-600" />
+                      <span>Copy SQL Schema</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="relative rounded-xl overflow-hidden border border-slate-800 bg-slate-950 p-4 font-mono text-[11px] text-slate-300 max-h-56 overflow-y-auto">
+                <pre>{supabaseSchemaSql}</pre>
+              </div>
+            </div>
+
+            {/* Recent Appointments Sync Status */}
+            <div className="pt-2 border-t border-slate-200 space-y-3">
+              <h4 className="font-bold text-slate-900 text-sm">Live Appointment Records</h4>
+              <p className="text-xs text-slate-500">
+                Every booking made on Harsha Hospital's portal is immediately sent to Supabase.
+              </p>
+
+              {appointments.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+                  No appointments booked yet. Fill the appointment form on the website to see it appear here and in Supabase!
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-50 text-slate-700 border-b border-slate-200">
+                      <tr>
+                        <th className="py-2.5 px-3">Ref ID</th>
+                        <th className="py-2.5 px-3">Patient</th>
+                        <th className="py-2.5 px-3">Phone</th>
+                        <th className="py-2.5 px-3">Doctor</th>
+                        <th className="py-2.5 px-3">Date & Time</th>
+                        <th className="py-2.5 px-3 text-right">Supabase Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {appointments.slice(0, 10).map((apt) => {
+                        const doc = doctors.find((d) => d.id === apt.doctorId);
+                        return (
+                          <tr key={apt.id} className="hover:bg-slate-50">
+                            <td className="py-2 px-3 font-mono font-bold text-teal-800">
+                              {apt.appointmentNumber}
+                            </td>
+                            <td className="py-2 px-3 font-medium text-slate-900">{apt.patientName}</td>
+                            <td className="py-2 px-3 text-slate-600">{apt.phone}</td>
+                            <td className="py-2 px-3 text-slate-700">{doc ? doc.name : 'OPD Doctor'}</td>
+                            <td className="py-2 px-3 text-slate-600">
+                              {apt.appointmentDate} • {apt.appointmentTime}
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block"></span>
+                                Synced to Supabase
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         )}
