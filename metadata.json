@@ -1,0 +1,6 @@
+{
+  "name": "Harsha Hospital - Hiriyur Appointment Booking",
+  "description": "Official appointment booking and healthcare portal for Harsha Hospital in Hiriyur, Chitradurga, Karnataka. Book doctor consultations, check real-time slot availability, and manage patient appointments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
